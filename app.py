@@ -1,7 +1,6 @@
 import streamlit as st
 from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.orm import declarative_base, sessionmaker
 from passlib.context import CryptContext
 from transformers import pipeline
 import PyPDF2
@@ -13,6 +12,10 @@ import os
 st.set_page_config(page_title="HealthMate AI", layout="wide")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    st.error("❌ DATABASE_URL not set. Add it in Streamlit → Settings → Secrets.")
+    st.stop()
 
 engine = create_engine(DATABASE_URL)
 Base = declarative_base()
@@ -51,7 +54,7 @@ class EHR(Base):
 Base.metadata.create_all(engine)
 
 # -----------------------------
-# AI MODEL (BioBERT-like NER)
+# AI MODEL
 # -----------------------------
 @st.cache_resource
 def load_model():
@@ -63,10 +66,18 @@ ner_model = load_model()
 # HELPER FUNCTIONS
 # -----------------------------
 def register_user(username, password, role):
+    if not username or not password:
+        return "Username and password required"
+
+    existing = session.query(User).filter_by(username=username).first()
+    if existing:
+        return "Username already exists"
+
     hashed_pw = pwd_context.hash(password)
     new_user = User(username=username, password=hashed_pw, role=role)
     session.add(new_user)
     session.commit()
+    return "success"
 
 def login_user(username, password):
     user = session.query(User).filter_by(username=username).first()
@@ -78,29 +89,43 @@ def extract_text_from_pdf(file):
     reader = PyPDF2.PdfReader(file)
     text = ""
     for page in reader.pages:
-        text += page.extract_text()
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text
     return text
 
 # -----------------------------
-# LOGIN SYSTEM
+# SESSION STATE
 # -----------------------------
 if "username" not in st.session_state:
     st.session_state.username = None
 if "role" not in st.session_state:
     st.session_state.role = None
 
+# -----------------------------
+# UI
+# -----------------------------
 st.title("🏥 HealthMate AI Healthcare System")
 
 menu = st.selectbox("Select Option", ["Login", "Register"])
 username = st.text_input("Username")
 password = st.text_input("Password", type="password")
 
+# -----------------------------
+# REGISTER
+# -----------------------------
 if menu == "Register":
     role = st.selectbox("Role", ["patient", "doctor"])
     if st.button("Register"):
-        register_user(username, password, role)
-        st.success("Registered Successfully")
+        result = register_user(username, password, role)
+        if result == "success":
+            st.success("Registered Successfully")
+        else:
+            st.error(result)
 
+# -----------------------------
+# LOGIN
+# -----------------------------
 if menu == "Login":
     if st.button("Login"):
         user = login_user(username, password)
@@ -108,6 +133,7 @@ if menu == "Login":
             st.session_state.username = user.username
             st.session_state.role = user.role
             st.success("Login Successful")
+            st.rerun()
         else:
             st.error("Invalid Credentials")
 
@@ -120,7 +146,7 @@ if st.session_state.username:
     if st.sidebar.button("Logout"):
         st.session_state.username = None
         st.session_state.role = None
-        st.experimental_rerun()
+        st.rerun()
 
 # -----------------------------
 # PATIENT DASHBOARD
@@ -140,9 +166,18 @@ if st.session_state.role == "patient":
 
     # Profile Section
     st.subheader("Profile")
+
     patient.full_name = st.text_input("Full Name", patient.full_name or "")
     patient.age = st.number_input("Age", 0, 120, patient.age or 0)
-    patient.gender = st.selectbox("Gender", ["Male", "Female", "Other"])
+
+    gender_options = ["Male", "Female", "Other"]
+    current_gender = patient.gender if patient.gender in gender_options else "Male"
+    patient.gender = st.selectbox(
+        "Gender",
+        gender_options,
+        index=gender_options.index(current_gender)
+    )
+
     patient.blood_group = st.text_input("Blood Group", patient.blood_group or "")
     patient.contact = st.text_input("Contact", patient.contact or "")
 
