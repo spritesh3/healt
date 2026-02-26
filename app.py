@@ -1,7 +1,7 @@
 import streamlit as st
 from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, declarative_base
-from passlib.hash import bcrypt
+from passlib.hash import pbkdf2_sha256
 
 # ------------------------
 # Database Setup
@@ -28,25 +28,32 @@ if "logged_in" not in st.session_state:
     st.session_state.role = None
     st.session_state.username = None
 
+# ------------------------
+# Functions
+# ------------------------
 def register_user(username, password, role):
-    hashed_pw = bcrypt.hash(password)
+    existing_user = session.query(User).filter_by(username=username).first()
+    if existing_user:
+        return False
+    hashed_pw = pbkdf2_sha256.hash(password)
     new_user = User(username=username, password=hashed_pw, role=role)
     session.add(new_user)
     session.commit()
-
+    return True
 
 def login_user(username, password):
     user = session.query(User).filter_by(username=username).first()
-    if user and bcrypt.verify(password, user.password):
+    if user and pbkdf2_sha256.verify(password, user.password):
         st.session_state.logged_in = True
         st.session_state.role = user.role
         st.session_state.username = username
         return True
     return False
 
-
-
-st.title("HealthMate Role-Based Login 🏥")
+# ------------------------
+# UI
+# ------------------------
+st.title("🏥 HealthMate Secure Login System")
 
 if not st.session_state.logged_in:
 
@@ -58,8 +65,10 @@ if not st.session_state.logged_in:
     if menu == "Register":
         role = st.selectbox("Select Role", ["doctor", "patient"])
         if st.button("Register"):
-            register_user(username, password, role)
-            st.success("Registered Successfully!")
+            if register_user(username, password, role):
+                st.success("Registered Successfully!")
+            else:
+                st.error("Username already exists!")
 
     if menu == "Login":
         if st.button("Login"):
@@ -68,10 +77,9 @@ if not st.session_state.logged_in:
             else:
                 st.error("Invalid Credentials")
 
-
-
-
-
+# ------------------------
+# Dashboard
+# ------------------------
 if st.session_state.logged_in:
 
     st.sidebar.write(f"Logged in as: {st.session_state.username}")
@@ -81,21 +89,12 @@ if st.session_state.logged_in:
         st.session_state.logged_in = False
         st.experimental_rerun()
 
-    # ------------------------
-    # Patient Dashboard
-    # ------------------------
     if st.session_state.role == "patient":
-        st.header("Patient Dashboard")
+        st.header("👤 Patient Dashboard")
         st.write("You can upload reports and view your health data here.")
 
-    # ------------------------
-    # Doctor Dashboard
-    # ------------------------
     if st.session_state.role == "doctor":
-        st.header("Doctor Dashboard")
+        st.header("🩺 Doctor Dashboard")
         st.write("You can view patient records and add notes here.")
 
-
-
-
-
+    st.warning("⚠️ This system is not a substitute for professional medical advice.")
