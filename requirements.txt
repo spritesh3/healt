@@ -1,6 +1,7 @@
 streamlit
 sqlalchemy
-passlib
+passlib[bcrypt]
+bcrypt
 transformers
 torch
 PyPDF2
