@@ -1,9 +1,9 @@
 import streamlit as st
 from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker
-from passlib.context import CryptContext
 from transformers import pipeline
 import PyPDF2
+import hashlib
 import os
 
 # -----------------------------
@@ -14,15 +14,20 @@ st.set_page_config(page_title="HealthMate AI", layout="wide")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    st.error("❌ DATABASE_URL not set. Add it in Streamlit → Settings → Secrets.")
+    st.error("❌ DATABASE_URL not set in Streamlit Secrets.")
     st.stop()
 
-engine = create_engine(DATABASE_URL)
+try:
+    engine = create_engine(DATABASE_URL)
+    connection = engine.connect()
+    connection.close()
+except Exception as e:
+    st.error(f"Database connection failed: {e}")
+    st.stop()
+
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
 session = Session()
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # -----------------------------
 # TABLES
@@ -63,6 +68,12 @@ def load_model():
 ner_model = load_model()
 
 # -----------------------------
+# PASSWORD HASHING (SHA256)
+# -----------------------------
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+# -----------------------------
 # HELPER FUNCTIONS
 # -----------------------------
 def register_user(username, password, role):
@@ -73,7 +84,7 @@ def register_user(username, password, role):
     if existing:
         return "Username already exists"
 
-    hashed_pw = pwd_context.hash(password)
+    hashed_pw = hash_password(password)
     new_user = User(username=username, password=hashed_pw, role=role)
     session.add(new_user)
     session.commit()
@@ -81,7 +92,7 @@ def register_user(username, password, role):
 
 def login_user(username, password):
     user = session.query(User).filter_by(username=username).first()
-    if user and pwd_context.verify(password, user.password):
+    if user and user.password == hash_password(password):
         return user
     return None
 
@@ -164,7 +175,6 @@ if st.session_state.role == "patient":
         session.add(patient)
         session.commit()
 
-    # Profile Section
     st.subheader("Profile")
 
     patient.full_name = st.text_input("Full Name", patient.full_name or "")
@@ -185,7 +195,6 @@ if st.session_state.role == "patient":
         session.commit()
         st.success("Profile Updated")
 
-    # Upload Reports
     st.subheader("Upload Medical Report (PDF)")
     uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
 
@@ -200,7 +209,6 @@ if st.session_state.role == "patient":
         session.commit()
         st.success("Report Uploaded & Stored")
 
-    # AI Chatbot
     st.subheader("🤖 AI Medical Assistant")
     user_query = st.text_input("Ask Health Question")
 
