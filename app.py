@@ -20,9 +20,10 @@ if not DATABASE_URL:
 try:
     engine = create_engine(DATABASE_URL)
     connection = engine.connect()
+    st.success("✅ Database Connected Successfully")
     connection.close()
 except Exception as e:
-    st.error(f"Database connection failed: {e}")
+    st.error(f"❌ Database connection failed: {e}")
     st.stop()
 
 Base = declarative_base()
