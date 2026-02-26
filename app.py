@@ -1,38 +1,33 @@
 import streamlit as st
-from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from datetime import datetime
+from passlib.context import CryptContext
 from transformers import pipeline
-import PyPDF2
-import hashlib
-import os
+import json
+import pandas as pd
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
 
-# -----------------------------
+# =============================
 # CONFIG
-# -----------------------------
-st.set_page_config(page_title="HealthMate AI", layout="wide")
+# =============================
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = st.secrets["DATABASE_URL"]
 
-if not DATABASE_URL:
-    st.error("❌ DATABASE_URL not set in Streamlit Secrets.")
-    st.stop()
-
-try:
-    engine = create_engine(DATABASE_URL)
-    connection = engine.connect()
-    st.success("✅ Database Connected Successfully")
-    connection.close()
-except Exception as e:
-    st.error(f"❌ Database connection failed: {e}")
-    st.stop()
-
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
-Session = sessionmaker(bind=engine)
-session = Session()
 
-# -----------------------------
-# TABLES
-# -----------------------------
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+ner_pipeline = pipeline("ner", model="d4data/biomedical-ner-all")
+
+# =============================
+# DATABASE MODELS
+# =============================
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
@@ -40,199 +35,266 @@ class User(Base):
     password = Column(String)
     role = Column(String)
 
-class Patient(Base):
-    __tablename__ = "patients"
+class QueryHistory(Base):
+    __tablename__ = "query_history"
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    full_name = Column(String)
-    age = Column(Integer)
-    gender = Column(String)
-    blood_group = Column(String)
-    contact = Column(String)
+    username = Column(String)
+    question = Column(Text)
+    result = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
-class EHR(Base):
-    __tablename__ = "ehr"
-    id = Column(Integer, primary_key=True)
-    patient_id = Column(Integer, ForeignKey("patients.id"))
-    report_name = Column(String)
-    extracted_text = Column(Text)
+Base.metadata.create_all(bind=engine)
 
-Base.metadata.create_all(engine)
+# =============================
+# AUTH FUNCTIONS
+# =============================
 
-# -----------------------------
-# AI MODEL
-# -----------------------------
-@st.cache_resource
-def load_model():
-    return pipeline("ner", model="d4data/biomedical-ner-all")
-
-ner_model = load_model()
-
-# -----------------------------
-# PASSWORD HASHING (SHA256)
-# -----------------------------
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
-# -----------------------------
-# HELPER FUNCTIONS
-# -----------------------------
 def register_user(username, password, role):
-    if not username or not password:
-        return "Username and password required"
-
-    existing = session.query(User).filter_by(username=username).first()
+    db = SessionLocal()
+    existing = db.query(User).filter(User.username == username).first()
     if existing:
-        return "Username already exists"
-
-    hashed_pw = hash_password(password)
-    new_user = User(username=username, password=hashed_pw, role=role)
-    session.add(new_user)
-    session.commit()
-    return "success"
+        db.close()
+        return False
+    hashed_pw = pwd_context.hash(password)
+    user = User(username=username, password=hashed_pw, role=role)
+    db.add(user)
+    db.commit()
+    db.close()
+    return True
 
 def login_user(username, password):
-    user = session.query(User).filter_by(username=username).first()
-    if user and user.password == hash_password(password):
+    db = SessionLocal()
+    user = db.query(User).filter(User.username == username).first()
+    db.close()
+    if user and pwd_context.verify(password, user.password):
         return user
     return None
 
-def extract_text_from_pdf(file):
-    reader = PyPDF2.PdfReader(file)
-    text = ""
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text
-    return text
+# =============================
+# PDF GENERATION
+# =============================
 
-# -----------------------------
-# SESSION STATE
-# -----------------------------
-if "username" not in st.session_state:
-    st.session_state.username = None
-if "role" not in st.session_state:
-    st.session_state.role = None
+def generate_pdf(username):
+    db = SessionLocal()
+    history = db.query(QueryHistory).filter(
+        QueryHistory.username == username
+    ).order_by(QueryHistory.created_at.desc()).all()
+    db.close()
 
-# -----------------------------
+    file_path = f"{username}_history.pdf"
+    doc = SimpleDocTemplate(file_path)
+    elements = []
+    styles = getSampleStyleSheet()
+
+    elements.append(Paragraph("AI Medical Assistant - Query History", styles["Heading1"]))
+    elements.append(Spacer(1, 0.3 * inch))
+
+    for item in history:
+        elements.append(Paragraph(f"<b>Question:</b> {item.question}", styles["Normal"]))
+        elements.append(Paragraph(f"<b>Date:</b> {item.created_at}", styles["Normal"]))
+        elements.append(Paragraph(f"<b>Result:</b> {item.result}", styles["Normal"]))
+        elements.append(Spacer(1, 0.3 * inch))
+
+    doc.build(elements)
+    return file_path
+
+# =============================
 # UI
-# -----------------------------
-st.title("🏥 HealthMate AI Healthcare System")
+# =============================
 
-menu = st.selectbox("Select Option", ["Login", "Register"])
-username = st.text_input("Username")
-password = st.text_input("Password", type="password")
+st.title("🧠 AI Medical Assistant")
 
-# -----------------------------
+st.warning("""
+⚠️ Medical Disclaimer:
+This AI tool is for informational purposes only.
+It does NOT provide medical diagnosis or treatment.
+Always consult a healthcare professional.
+""")
+
+menu = st.sidebar.selectbox("Menu", ["Login", "Register"])
+
+# =============================
 # REGISTER
-# -----------------------------
-if menu == "Register":
-    role = st.selectbox("Role", ["patient", "doctor"])
-    if st.button("Register"):
-        result = register_user(username, password, role)
-        if result == "success":
-            st.success("Registered Successfully")
-        else:
-            st.error(result)
+# =============================
 
-# -----------------------------
+if menu == "Register":
+    st.subheader("Register")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    role = st.selectbox("Role", ["patient", "doctor"])
+
+    if st.button("Register"):
+        if register_user(username, password, role):
+            st.success("Registered successfully!")
+        else:
+            st.error("Username already exists")
+
+# =============================
 # LOGIN
-# -----------------------------
-if menu == "Login":
+# =============================
+
+elif menu == "Login":
+    st.subheader("Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
     if st.button("Login"):
         user = login_user(username, password)
         if user:
-            st.session_state.username = user.username
-            st.session_state.role = user.role
-            st.success("Login Successful")
-            st.rerun()
+            st.session_state["username"] = user.username
+            st.session_state["role"] = user.role
+            st.success("Login successful")
         else:
-            st.error("Invalid Credentials")
+            st.error("Invalid credentials")
 
-# -----------------------------
-# SIDEBAR
-# -----------------------------
-if st.session_state.username:
-    st.sidebar.success(f"Logged in as {st.session_state.username}")
-    st.sidebar.info(f"Role: {st.session_state.role}")
-    if st.sidebar.button("Logout"):
-        st.session_state.username = None
-        st.session_state.role = None
-        st.rerun()
+# =============================
+# AFTER LOGIN
+# =============================
 
-# -----------------------------
-# PATIENT DASHBOARD
-# -----------------------------
-if st.session_state.role == "patient":
+if "username" in st.session_state:
 
-    st.header("👤 Patient Dashboard")
-    st.warning("⚠️ Not a substitute for professional medical advice")
+    st.sidebar.write(f"Logged in as: {st.session_state['username']}")
+    st.sidebar.write(f"Role: {st.session_state['role']}")
 
-    user = session.query(User).filter_by(username=st.session_state.username).first()
-    patient = session.query(Patient).filter_by(user_id=user.id).first()
+    st.subheader("Ask Health Question")
+    user_input = st.text_area("Enter medical question")
 
-    if not patient:
-        patient = Patient(user_id=user.id)
-        session.add(patient)
-        session.commit()
+    if st.button("Analyze") and user_input.strip() != "":
+        with st.spinner("Analyzing..."):
+            results = ner_pipeline(user_input)
 
-    st.subheader("Profile")
+        filtered = [
+            r for r in results
+            if r["score"] > 0.60 and not r["entity"].lower().startswith("b-coreference")
+        ]
 
-    patient.full_name = st.text_input("Full Name", patient.full_name or "")
-    patient.age = st.number_input("Age", 0, 120, patient.age or 0)
+        if not filtered:
+            st.warning("No significant entities detected.")
+        else:
+            display_results = []
+            st.subheader("🩺 Extracted Medical Entities")
 
-    gender_options = ["Male", "Female", "Other"]
-    current_gender = patient.gender if patient.gender in gender_options else "Male"
-    patient.gender = st.selectbox(
-        "Gender",
-        gender_options,
-        index=gender_options.index(current_gender)
-    )
+            for r in filtered:
+                clean_entity = r["entity"].replace("B-", "").replace("I-", "")
+                confidence = round(r["score"] * 100, 2)
 
-    patient.blood_group = st.text_input("Blood Group", patient.blood_group or "")
-    patient.contact = st.text_input("Contact", patient.contact or "")
+                display_results.append({
+                    "term": r["word"],
+                    "category": clean_entity,
+                    "confidence": confidence
+                })
 
-    if st.button("Save Profile"):
-        session.commit()
-        st.success("Profile Updated")
+                st.markdown(f"""
+                **Term:** {r['word']}  
+                **Category:** {clean_entity}  
+                Confidence: {confidence}%
+                """)
 
-    st.subheader("Upload Medical Report (PDF)")
-    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+            db = SessionLocal()
+            history_entry = QueryHistory(
+                username=st.session_state["username"],
+                question=user_input,
+                result=json.dumps(display_results)
+            )
+            db.add(history_entry)
+            db.commit()
+            db.close()
 
-    if uploaded_file:
-        text = extract_text_from_pdf(uploaded_file)
-        new_report = EHR(
-            patient_id=patient.id,
-            report_name=uploaded_file.name,
-            extracted_text=text
-        )
-        session.add(new_report)
-        session.commit()
-        st.success("Report Uploaded & Stored")
+    # =============================
+    # DOCTOR DASHBOARD
+    # =============================
 
-    st.subheader("🤖 AI Medical Assistant")
-    user_query = st.text_input("Ask Health Question")
+    if st.session_state["role"] == "doctor":
 
-    if user_query:
-        results = ner_model(user_query)
-        st.write("### Extracted Medical Entities:")
-        st.write(results)
+        st.subheader("📊 Doctor Analytics Dashboard")
 
-# -----------------------------
-# DOCTOR DASHBOARD
-# -----------------------------
-if st.session_state.role == "doctor":
+        db = SessionLocal()
+        all_history = db.query(QueryHistory).all()
+        db.close()
 
-    st.header("🩺 Doctor Dashboard")
+        if all_history:
 
-    patients = session.query(Patient).all()
+            data = []
+            query_data = []
 
-    for p in patients:
-        st.write("---")
-        st.write(f"Name: {p.full_name}")
-        st.write(f"Age: {p.age}")
-        st.write(f"Blood Group: {p.blood_group}")
+            for item in all_history:
+                query_data.append({
+                    "username": item.username,
+                    "question": item.question,
+                    "date": item.created_at
+                })
 
-        reports = session.query(EHR).filter_by(patient_id=p.id).all()
-        for r in reports:
-            st.write(f"Report: {r.report_name}")
+                try:
+                    results = json.loads(item.result)
+                    for r in results:
+                        data.append({
+                            "username": item.username,
+                            "term": r.get("term"),
+                            "category": r.get("category"),
+                            "date": item.created_at
+                        })
+                except:
+                    pass
+
+            df = pd.DataFrame(data)
+            query_df = pd.DataFrame(query_data)
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Queries", len(query_df))
+            col2.metric("Total Medical Entities", len(df))
+            col3.metric("Active Users", query_df["username"].nunique())
+
+            st.divider()
+
+            if not df.empty:
+                st.subheader("🧬 Most Common Categories")
+                st.bar_chart(df["category"].value_counts())
+
+                st.subheader("💊 Top 10 Medical Terms")
+                st.bar_chart(df["term"].value_counts().head(10))
+
+            if not query_df.empty:
+                st.subheader("👥 Queries Per User")
+                st.bar_chart(query_df["username"].value_counts())
+
+                st.subheader("📅 Queries Over Time")
+                query_df["date"] = pd.to_datetime(query_df["date"])
+                time_series = query_df.groupby(query_df["date"].dt.date).size()
+                st.line_chart(time_series)
+
+        else:
+            st.info("No analytics data available.")
+
+    # =============================
+    # PATIENT DASHBOARD
+    # =============================
+
+    else:
+        st.subheader("📜 Your History")
+
+        db = SessionLocal()
+        history = db.query(QueryHistory).filter(
+            QueryHistory.username == st.session_state["username"]
+        ).order_by(QueryHistory.created_at.desc()).all()
+        db.close()
+
+        for item in history:
+            st.markdown(f"""
+            **Question:** {item.question}  
+            **Date:** {item.created_at}
+            """)
+            st.json(item.result)
+
+    # =============================
+    # DOWNLOAD PDF
+    # =============================
+
+    if st.button("Download My History as PDF"):
+        pdf_path = generate_pdf(st.session_state["username"])
+        with open(pdf_path, "rb") as f:
+            st.download_button(
+                label="Download PDF",
+                data=f,
+                file_name=pdf_path,
+                mime="application/pdf"
+            )
