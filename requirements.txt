@@ -1,0 +1,5 @@
+streamlit
+sqlalchemy
+passlib
+transformers
+torch
