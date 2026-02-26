@@ -4,3 +4,4 @@ passlib
 transformers
 torch
 PyPDF2
+psycopg2-binary
